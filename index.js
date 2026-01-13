@@ -1,26 +1,20 @@
 require("dotenv").config();
 const { Telegraf } = require("telegraf");
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const ALLOWED_CHAT_ID = String(process.env.ALLOWED_CHAT_ID || "").trim();
+const bot = new Telegraf(process.env.BOT_TOKEN);
 
-if (!BOT_TOKEN) {
-  console.error("❌ Missing BOT_TOKEN");
-  process.exit(1);
-}
-if (!ALLOWED_CHAT_ID) {
-  console.error("❌ Missing ALLOWED_CHAT_ID in .env");
-  process.exit(1);
-}
+// Parse allowed groups
+const ALLOWED = (process.env.ALLOWED_CHAT_IDS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
 
-const bot = new Telegraf(BOT_TOKEN);
-
-// chatId => { seq, totalSaved, pendingSave: {name, until, replyMsgId} }
+// RAM state per group
+// chatId => { seq, totalSaved, pendingSave }
 const RAM = new Map();
 
 function isAllowed(ctx) {
-  const chatId = String(ctx.chat?.id ?? "");
-  return chatId === ALLOWED_CHAT_ID;
+  return ALLOWED.includes(String(ctx.chat?.id || ""));
 }
 
 function bucket(chatId) {
@@ -40,17 +34,11 @@ function extractWallets(text) {
 bot.start((ctx) => {
   if (!isAllowed(ctx)) return;
   ctx.reply(
-    "🔒 Wallet Namer BOT (Group-Only)\n\n" +
-      "• /save <name> → bot sẽ gửi 1 message, bạn REPLY vào đó để paste ví (trong 15s)\n" +
+    "🔒 Wallet Namer BOT (Multi-Group)\n\n" +
+      "• /save <name> → reply vào tin nhắn bot trong 15s để paste ví\n" +
       "• /reset → reset số đếm\n" +
-      "• /stats → xem tổng\n" +
-      "• /chatid → xem ID group"
+      "• /stats → xem tổng"
   );
-});
-
-bot.command("chatid", (ctx) => {
-  if (!isAllowed(ctx)) return;
-  ctx.reply(`🆔 Chat ID: ${ctx.chat.id}`);
 });
 
 bot.command("reset", (ctx) => {
@@ -58,52 +46,35 @@ bot.command("reset", (ctx) => {
   const b = bucket(ctx.chat.id);
   b.seq = 0;
   b.pendingSave = null;
-  ctx.reply("🔁 Reset xong ✅ (lần lưu tiếp theo bắt đầu từ 1)");
+  ctx.reply("🔁 Reset xong, lần sau bắt đầu từ 1");
 });
 
 bot.command("stats", (ctx) => {
   if (!isAllowed(ctx)) return;
   const b = bucket(ctx.chat.id);
-  ctx.reply(
-    `📊 Stats:\n` +
-      `• seq hiện tại: ${b.seq}\n` +
-      `• tổng ví đã lưu (từ lúc bot chạy): ${b.totalSaved}`
-  );
+  ctx.reply(`📊 seq=${b.seq} | total=${b.totalSaved}`);
 });
 
 bot.command("save", async (ctx) => {
   if (!isAllowed(ctx)) return;
 
-  const name = String(ctx.message.text || "").replace(/^\/save(@\w+)?\s*/i, "").trim();
-  if (!name) return ctx.reply("Dùng: /save <name>\nVí dụ: /save Tao là bố mày");
+  const name = ctx.message.text.replace(/^\/save(@\w+)?\s*/i, "").trim();
+  if (!name) return ctx.reply("Dùng: /save <name>");
 
   const b = bucket(ctx.chat.id);
-  const until = Date.now() + 15000;
-
-  // Bot gửi 1 message để bạn REPLY vào (an toàn, không cần tắt Privacy Mode)
-  const msg = await ctx.reply(
-    `⏳ OK! Reply tin nhắn này và paste ví trong 15s\n🏷️ Name: ${name}`
-  );
-
-  b.pendingSave = { name, until, replyMsgId: msg.message_id };
+  const msg = await ctx.reply(`⏳ Reply tin nhắn này trong 15s\nName: ${name}`);
+  b.pendingSave = { name, until: Date.now() + 15000, replyMsgId: msg.message_id };
 });
 
-// ===== Only process replies to bot's save message =====
+// ===== Only accept reply =====
 bot.on("text", (ctx) => {
   if (!isAllowed(ctx)) return;
 
   const b = bucket(ctx.chat.id);
-  if (!b.pendingSave) return;
+  if (!b.pendingSave || Date.now() > b.pendingSave.until) return;
 
-  // hết hạn
-  if (Date.now() > b.pendingSave.until) {
-    b.pendingSave = null;
-    return;
-  }
-
-  // phải là reply vào đúng message bot vừa gửi
-  const replyToId = ctx.message?.reply_to_message?.message_id;
-  if (!replyToId || replyToId !== b.pendingSave.replyMsgId) return;
+  const replyTo = ctx.message?.reply_to_message?.message_id;
+  if (replyTo !== b.pendingSave.replyMsgId) return;
 
   const wallets = extractWallets(ctx.message.text);
   if (!wallets.length) return;
@@ -115,11 +86,8 @@ bot.on("text", (ctx) => {
     out.push(`${w} ${b.pendingSave.name} ${b.seq}`);
   }
 
-  b.pendingSave = null; // auto close sau 1 lần reply
+  b.pendingSave = null;
   ctx.reply(out.join("\n"));
 });
 
-bot.launch().then(() => console.log("✅ Group-only Wallet Namer Bot running"));
-
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+bot.launch();
