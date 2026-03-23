@@ -10,14 +10,13 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-// Allowed group chat IDs
 const ALLOWED = (process.env.ALLOWED_CHAT_IDS || "")
   .split(",")
   .map((x) => x.trim())
   .filter(Boolean);
 
 if (ALLOWED.length === 0) {
-  console.error("❌ Missing ALLOWED_CHAT_IDS in .env (comma-separated chat IDs)");
+  console.error("❌ Missing ALLOWED_CHAT_IDS in .env");
   process.exit(1);
 }
 
@@ -36,7 +35,6 @@ bot.use((ctx, next) => {
 });
 
 // ================== RAM STATE ==================
-// chatId => { seq, totalSaved, pendingSave }
 const RAM = new Map();
 
 function isAllowed(ctx) {
@@ -56,18 +54,19 @@ function bucket(chatId) {
 
 // ================== HELPERS ==================
 
-// Solana pubkey basic check
+// detect sol wallet
 function extractWallets(text) {
   const re = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
   return [...new Set(String(text || "").match(re) || [])];
 }
 
+// BUILD OUTPUT (NO /add)
 function buildOutput(wallets, name, b) {
   const out = [];
   for (const w of wallets) {
     b.seq++;
     b.totalSaved++;
-    out.push(`/add ${w} ${name} ${b.seq}`);
+    out.push(`${w} ${name} ${b.seq}`);
   }
   return out;
 }
@@ -84,7 +83,7 @@ function sendLargeTextOrFile(ctx, out, name) {
   const header =
     `✅ Saved ${out.length} wallets\n` +
     `Name: ${name}\n` +
-    `Format: /add <wallet> <name> <seq>\n` +
+    `Format: <wallet> <name> <seq>\n` +
     `---\n`;
 
   const fileBuf = Buffer.from(header + text + "\n", "utf8");
@@ -102,13 +101,13 @@ async function downloadFileBuffer(fileUrl) {
     client
       .get(fileUrl, (res) => {
         if (res.statusCode !== 200) {
-          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          reject(new Error(`HTTP ${res.statusCode}`));
           res.resume();
           return;
         }
 
         const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("data", (c) => chunks.push(c));
         res.on("end", () => resolve(Buffer.concat(chunks)));
       })
       .on("error", reject);
@@ -120,28 +119,28 @@ async function handleWalletText(ctx, rawText, name) {
   const wallets = extractWallets(rawText);
 
   if (!wallets.length) {
-    return ctx.reply("❌ Không tìm thấy wallet hợp lệ trong nội dung.");
+    return ctx.reply("❌ Không tìm thấy wallet hợp lệ.");
   }
 
   const out = buildOutput(wallets, name, b);
   b.pendingSave = null;
 
-  await ctx.reply(`✅ Đã đọc ${wallets.length} wallet, đang format thành /add ...`);
+  await ctx.reply(`✅ Đã đọc ${wallets.length} wallet`);
   return sendLargeTextOrFile(ctx, out, name);
 }
 
 // ================== COMMANDS ==================
+
 bot.start((ctx) => {
   if (!isAllowed(ctx)) return;
 
   ctx.reply(
-    "🔒 Wallet Namer BOT (2 Groups)\n\n" +
-      "• /save <name> → reply tin nhắn bot trong 15s để paste ví hoặc gửi file .txt\n" +
-      "• /reset → reset số đếm\n" +
-      "• /stats → xem tổng\n\n" +
-      "Output format:\n" +
-      "• /add <wallet> <name> <seq>\n\n" +
-      `✅ Allowed groups: ${ALLOWED.length}`
+    "🔒 Wallet Namer BOT\n\n" +
+      "• /save <name> → reply trong 15s\n" +
+      "• Có thể paste text hoặc gửi file .txt\n" +
+      "• /reset → reset\n" +
+      "• /stats → thống kê\n\n" +
+      "Format:\n<wallet> <name> <seq>"
   );
 });
 
@@ -150,7 +149,7 @@ bot.command("reset", (ctx) => {
   const b = bucket(ctx.chat.id);
   b.seq = 0;
   b.pendingSave = null;
-  ctx.reply("🔁 Reset xong, lần sau bắt đầu từ 1");
+  ctx.reply("🔁 Reset xong");
 });
 
 bot.command("stats", (ctx) => {
@@ -170,10 +169,8 @@ bot.command("save", async (ctx) => {
 
   const b = bucket(ctx.chat.id);
   const msg = await ctx.reply(
-    `⏳ Reply tin nhắn này trong 15s\n` +
-      `Name: ${name}\n\n` +
-      `• Có thể paste text wallet\n` +
-      `• Hoặc gửi file .txt`
+    `⏳ Reply trong 15s\nName: ${name}\n\n` +
+      "• Paste ví\n• Hoặc gửi file .txt"
   );
 
   b.pendingSave = {
@@ -183,7 +180,7 @@ bot.command("save", async (ctx) => {
   };
 });
 
-// ================== TEXT INPUT ==================
+// ================== TEXT ==================
 bot.on("text", async (ctx) => {
   try {
     if (!isAllowed(ctx)) return;
@@ -194,23 +191,21 @@ bot.on("text", async (ctx) => {
     const replyTo = ctx.message?.reply_to_message?.message_id;
     if (replyTo !== b.pendingSave.replyMsgId) return;
 
-    const text = ctx.message?.text || "";
-    const wallets = extractWallets(text);
+    const wallets = extractWallets(ctx.message.text);
     if (!wallets.length) return;
 
-    const name = b.pendingSave.name;
-    const out = buildOutput(wallets, name, b);
-
+    const out = buildOutput(wallets, b.pendingSave.name, b);
     b.pendingSave = null;
-    await ctx.reply(`✅ Đã đọc ${wallets.length} wallet, đang format thành /add ...`);
-    return sendLargeTextOrFile(ctx, out, name);
+
+    await ctx.reply(`✅ ${wallets.length} wallets`);
+    return sendLargeTextOrFile(ctx, out, b.pendingSave?.name);
   } catch (err) {
-    console.error("text handler error:", err);
-    return ctx.reply("❌ Lỗi khi xử lý text.");
+    console.error(err);
+    ctx.reply("❌ lỗi text");
   }
 });
 
-// ================== TXT FILE INPUT ==================
+// ================== TXT FILE ==================
 bot.on("document", async (ctx) => {
   try {
     if (!isAllowed(ctx)) return;
@@ -221,37 +216,27 @@ bot.on("document", async (ctx) => {
     const replyTo = ctx.message?.reply_to_message?.message_id;
     if (replyTo !== b.pendingSave.replyMsgId) return;
 
-    const doc = ctx.message?.document;
-    if (!doc) return;
+    const doc = ctx.message.document;
+    const fileName = (doc.file_name || "").toLowerCase();
 
-    const fileName = String(doc.file_name || "").toLowerCase();
-    const mimeType = String(doc.mime_type || "").toLowerCase();
-
-    const isTxt =
-      fileName.endsWith(".txt") ||
-      mimeType === "text/plain" ||
-      mimeType === "application/octet-stream";
-
-    if (!isTxt) {
-      return ctx.reply("❌ Chỉ nhận file .txt thôi.");
+    if (!fileName.endsWith(".txt")) {
+      return ctx.reply("❌ chỉ nhận .txt");
     }
 
     const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-    const fileBuf = await downloadFileBuffer(fileLink.toString());
-    const rawText = fileBuf.toString("utf8");
+    const buf = await downloadFileBuffer(fileLink.toString());
+    const text = buf.toString("utf8");
 
-    return handleWalletText(ctx, rawText, b.pendingSave.name);
+    return handleWalletText(ctx, text, b.pendingSave.name);
   } catch (err) {
-    console.error("document handler error:", err);
-    return ctx.reply("❌ Lỗi khi đọc file .txt.");
+    console.error(err);
+    ctx.reply("❌ lỗi đọc file");
   }
 });
 
 // ================== BOOT ==================
 bot.launch();
-console.log("✅ Wallet Namer BOT started");
-console.log("🔒 Allowed chat IDs:", ALLOWED.join(", "));
+console.log("✅ Bot started");
 
-// graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
